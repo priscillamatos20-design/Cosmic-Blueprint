@@ -1,0 +1,246 @@
+name: Estúdio Vértice CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+
+env:
+  PROJECT_ID: estudio-vertice-ai
+  REGION: us-central1
+  TERRAFORM_VERSION: 1.6.0
+
+jobs:
+  # Lint and Test Phase
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install black flake8 pylint pytest pytest-cov
+          find workers -name requirements.txt -exec pip install -r {} \;
+
+      - name: Lint Python code with Black
+        run: |
+          black --check --line-length 100 workers/
+
+      - name: Lint Python code with Flake8
+        run: |
+          flake8 workers/ --max-line-length=100 --ignore=E203,W503
+
+      - name: Lint Python code with Pylint
+        run: |
+          find workers -name "*.py" -exec pylint {} \; || true
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Format Check
+        run: |
+          cd infrastructure
+          terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: |
+          cd infrastructure
+          terraform init -backend=false
+          terraform validate
+
+      - name: Run Python tests
+        run: |
+          # Run tests if test files exist
+          if find tests -name "test_*.py" 2>/dev/null | grep -q .; then
+            pytest tests/ --cov=workers/ --cov-report=xml
+          else
+            echo "No tests found, skipping test execution"
+          fi
+
+  # Security Scanning
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Bandit Security Linter
+        run: |
+          pip install bandit
+          bandit -r workers/ -f json -o bandit-report.json || true
+
+      - name: Run Safety Check for Dependencies
+        run: |
+          pip install safety
+          find workers -name requirements.txt -exec safety check -r {} \; || true
+
+      - name: Terraform Security Scan with Checkov
+        run: |
+          pip install checkov
+          checkov -d infrastructure/ --framework terraform || true
+
+  # Build and Package
+  build:
+    name: Build and Package
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker
+
+      - name: Determine Environment
+        id: env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Package Cloud Functions
+        run: |
+          # Package each worker function
+          for worker in workers/*/; do
+            worker_name=$(basename "$worker")
+            echo "Packaging $worker_name..."
+            
+            cd "$worker"
+            zip -r "../../${worker_name}.zip" main.py requirements.txt
+            cd ../..
+            
+            # Upload to Cloud Storage
+            gsutil cp "${worker_name}.zip" "gs://${{ env.PROJECT_ID }}-${{ steps.env.outputs.environment }}-main/functions/"
+          done
+
+      - name: Build and Push Custom Container Images
+        run: |
+          # Build custom training container if needed
+          if [[ -f "intelligence/training/Dockerfile" ]]; then
+            docker build -t "gcr.io/${{ env.PROJECT_ID }}/kurzgesagt-trainer:${{ github.sha }}" intelligence/training/
+            docker push "gcr.io/${{ env.PROJECT_ID }}/kurzgesagt-trainer:${{ github.sha }}"
+            docker tag "gcr.io/${{ env.PROJECT_ID }}/kurzgesagt-trainer:${{ github.sha }}" "gcr.io/${{ env.PROJECT_ID }}/kurzgesagt-trainer:latest"
+            docker push "gcr.io/${{ env.PROJECT_ID }}/kurzgesagt-trainer:latest"
+          fi
+
+  # Infrastructure Deployment
+  deploy-infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Determine Environment
+        id: env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+          else
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Terraform Init
+        run: |
+          cd infrastructure
+          terraform init \
+            -backend-config="bucket=${{ env.PROJECT_ID }}-${{ steps.env.outputs.environment }}-terraform-state" \
+            -backend-config="prefix=terraform/state"
+
+      - name: Terraform Plan
+        run: |
+          cd infrastructure
+          terraform plan \
+            -var="environment=${{ steps.env.outputs.environment }}" \
+            -var="project_id=${{ env.PROJECT_ID }}" \
+            -out=tfplan
+
+      - name: Terraform Apply
+        run: |
+          cd infrastructure
+          terraform apply -auto-approve tfplan
+
+      - name: Save Terraform Outputs
+        run: |
+          cd infrastructure
+          terraform output -json > ../terraform-outputs.json
+
+      - name: Upload Terraform Outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs-${{ steps.env.outputs.environment }}
+          path: terraform-outputs.json
+
+  # Deployment notification
+  deployment-complete:
+    name: Deployment Complete
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    steps:
+      - name: Determine Environment
+        id: env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+          else
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Deployment Notification
+        run: |
+          echo "🎬 Estúdio Vértice deployed successfully to ${{ steps.env.outputs.environment }}!"
+          echo "📊 Dashboard: https://console.cloud.google.com/monitoring/dashboards"
+          echo "🔍 Logs: https://console.cloud.google.com/logs"
+          echo "⚡ Functions: https://console.cloud.google.com/functions"
