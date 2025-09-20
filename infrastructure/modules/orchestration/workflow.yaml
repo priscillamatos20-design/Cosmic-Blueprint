@@ -1,0 +1,278 @@
+# Estúdio Vértice - Pipeline Workflow
+# Orquestração completa para produção de vídeos educacionais
+# Metodologia Kurzgesagt Quantificada
+
+main:
+  params: [event]
+  steps:
+    - init:
+        assign:
+          - project_id: "${project_id}"
+          - region: "${region}"
+          - storage_bucket: "${storage_bucket}"
+          - start_time: $${time.format(sys.now())}
+          - request_id: $${text.split(text.split(string(event), "\"")[7], "\"")[0]}
+          - content: $${event.data.content}
+          - target_processing_time: 480  # 8 minutes in seconds
+          - target_quality_score: 9.0
+          - target_cost: 2.50
+    
+    - log_start:
+        call: sys.log
+        args:
+          text: $${"Iniciando pipeline Estúdio Vértice para request: " + request_id}
+          severity: INFO
+    
+    # FASE 1: ANÁLISE DE CONTEÚDO
+    - content_analysis:
+        call: http.post
+        args:
+          url: $${"https://${region}-${project_id}.cloudfunctions.net/${content_analyzer_function}"}
+          headers:
+            Content-Type: "application/json"
+          body:
+            content: $${content}
+            request_id: $${request_id}
+          timeout: 60
+        result: content_analysis_result
+    
+    - validate_content_analysis:
+        switch:
+          - condition: $${content_analysis_result.body.quality_validation.quality_score < 7.0}
+            next: content_analysis_failed
+        next: content_analysis_success
+    
+    - content_analysis_failed:
+        call: sys.log
+        args:
+          text: $${"Análise de conteúdo falhou - qualidade insuficiente: " + string(content_analysis_result.body.quality_validation.quality_score)}
+          severity: ERROR
+        next: end_with_error
+    
+    - content_analysis_success:
+        call: sys.log
+        args:
+          text: $${"Análise de conteúdo concluída - qualidade: " + string(content_analysis_result.body.quality_validation.quality_score)}
+          severity: INFO
+    
+    # FASE 2: GERAÇÃO DE ROTEIRO
+    - script_generation:
+        call: http.post
+        args:
+          url: $${"https://${region}-${project_id}.cloudfunctions.net/${script_generator_function}"}
+          headers:
+            Content-Type: "application/json"
+          body:
+            content_analysis: $${content_analysis_result.body.structure_analysis}
+            request_id: $${request_id}
+            kurzgesagt_methodology: true
+            nihilistic_optimism: true
+          timeout: 120
+        result: script_result
+    
+    - validate_script:
+        switch:
+          - condition: $${script_result.body.script_generation.status != "success"}
+            next: script_generation_failed
+        next: script_generation_success
+    
+    - script_generation_failed:
+        call: sys.log
+        args:
+          text: $${"Geração de roteiro falhou: " + script_result.body.script_generation.error}
+          severity: ERROR
+        next: end_with_error
+    
+    - script_generation_success:
+        call: sys.log
+        args:
+          text: "Roteiro gerado com sucesso usando metodologia Kurzgesagt"
+          severity: INFO
+    
+    # FASE 3: PROCESSAMENTO PARALELO (Visual + Audio)
+    - parallel_processing:
+        parallel:
+          shared: [project_id, region, request_id, script_result]
+          branches:
+            # Branch 1: Design Visual
+            - visual_design:
+                steps:
+                  - call_visual_designer:
+                      call: http.post
+                      args:
+                        url: $${"https://${region}-${project_id}.cloudfunctions.net/${visual_designer_function}"}
+                        headers:
+                          Content-Type: "application/json"
+                        body:
+                          script: $${script_result.body.script_generation.script}
+                          content_analysis: $${content_analysis_result.body.structure_analysis}
+                          request_id: $${request_id}
+                          visual_style: "kurzgesagt_inspired"
+                        timeout: 300
+                      result: visual_result
+                  
+                  - validate_visual:
+                      switch:
+                        - condition: $${visual_result.body.status != "success"}
+                          next: visual_failed
+                      next: visual_success
+                  
+                  - visual_failed:
+                      call: sys.log
+                      args:
+                        text: $${"Design visual falhou: " + visual_result.body.error}
+                        severity: ERROR
+                      next: end_visual_branch
+                  
+                  - visual_success:
+                      call: sys.log
+                      args:
+                        text: "Design visual concluído com sucesso"
+                        severity: INFO
+                  
+                  - end_visual_branch:
+                      return: $${visual_result}
+            
+            # Branch 2: Síntese de Audio
+            - audio_synthesis:
+                steps:
+                  - call_audio_synthesizer:
+                      call: http.post
+                      args:
+                        url: $${"https://${region}-${project_id}.cloudfunctions.net/${audio_synthesizer_function}"}
+                        headers:
+                          Content-Type: "application/json"
+                        body:
+                          script: $${script_result.body.script_generation.script}
+                          emotional_tone: $${script_result.body.script_generation.script.metadata.emotional_tone}
+                          request_id: $${request_id}
+                          voice_style: "educational_optimistic"
+                        timeout: 180
+                      result: audio_result
+                  
+                  - validate_audio:
+                      switch:
+                        - condition: $${audio_result.body.status != "success"}
+                          next: audio_failed
+                      next: audio_success
+                  
+                  - audio_failed:
+                      call: sys.log
+                      args:
+                        text: $${"Síntese de áudio falhou: " + audio_result.body.error}
+                        severity: ERROR
+                      next: end_audio_branch
+                  
+                  - audio_success:
+                      call: sys.log
+                      args:
+                        text: "Síntese de áudio concluída com sucesso"
+                        severity: INFO
+                  
+                  - end_audio_branch:
+                      return: $${audio_result}
+        
+        result: parallel_results
+    
+    # FASE 4: GARANTIA DE QUALIDADE
+    - quality_assurance:
+        call: http.post
+        args:
+          url: $${"https://${region}-${project_id}.cloudfunctions.net/${quality_assurer_function}"}
+          headers:
+            Content-Type: "application/json"
+          body:
+            visual_assets: $${parallel_results[0]}
+            audio_assets: $${parallel_results[1]}
+            script: $${script_result.body.script_generation.script}
+            content_analysis: $${content_analysis_result.body.structure_analysis}
+            request_id: $${request_id}
+            target_quality: $${target_quality_score}
+            kurzgesagt_standards: true
+          timeout: 240
+        result: quality_result
+    
+    - validate_quality:
+        switch:
+          - condition: $${quality_result.body.final_quality_score < target_quality_score}
+            next: quality_failed
+        next: quality_passed
+    
+    - quality_failed:
+        call: sys.log
+        args:
+          text: $${"Garantia de qualidade falhou - score: " + string(quality_result.body.final_quality_score)}
+          severity: ERROR
+        next: end_with_error
+    
+    - quality_passed:
+        call: sys.log
+        args:
+          text: $${"Garantia de qualidade aprovada - score: " + string(quality_result.body.final_quality_score)}
+          severity: INFO
+    
+    # FASE 5: ANÁLISE DE PERFORMANCE
+    - performance_analysis:
+        call: http.post
+        args:
+          url: $${"https://${region}-${project_id}.cloudfunctions.net/${performance_analyzer_function}"}
+          headers:
+            Content-Type: "application/json"
+          body:
+            final_video: $${quality_result.body.final_video}
+            processing_metrics:
+              start_time: $${start_time}
+              end_time: $${time.format(sys.now())}
+              content_analysis: $${content_analysis_result.body}
+              script_generation: $${script_result.body}
+              visual_design: $${parallel_results[0]}
+              audio_synthesis: $${parallel_results[1]}
+              quality_assurance: $${quality_result.body}
+            request_id: $${request_id}
+            targets:
+              processing_time: $${target_processing_time}
+              quality_score: $${target_quality_score}
+              cost: $${target_cost}
+          timeout: 60
+        result: performance_result
+    
+    # FASE 6: FINALIZAÇÃO
+    - calculate_final_metrics:
+        assign:
+          - processing_time_seconds: $${time.parse(performance_result.body.metrics.processing_time) - time.parse(start_time)}
+          - final_cost: $${performance_result.body.metrics.total_cost}
+          - final_quality: $${quality_result.body.final_quality_score}
+          - success: $${processing_time_seconds <= target_processing_time and final_cost <= target_cost and final_quality >= target_quality_score}
+    
+    - log_completion:
+        call: sys.log
+        args:
+          text: $${"Pipeline concluído - Tempo: " + string(processing_time_seconds) + "s, Custo: $" + string(final_cost) + ", Qualidade: " + string(final_quality)}
+          severity: INFO
+    
+    - return_success:
+        return:
+          status: "success"
+          request_id: $${request_id}
+          metrics:
+            processing_time_seconds: $${processing_time_seconds}
+            cost_usd: $${final_cost}
+            quality_score: $${final_quality}
+            targets_met: $${success}
+          outputs:
+            final_video: $${quality_result.body.final_video}
+            performance_analysis: $${performance_result.body}
+          methodology: "kurzgesagt_quantified"
+          version: "4.1.0"
+    
+    # ERROR HANDLING
+    - end_with_error:
+        call: sys.log
+        args:
+          text: $${"Pipeline falhou para request: " + request_id}
+          severity: ERROR
+        return:
+          status: "error"
+          request_id: $${request_id}
+          error: "Pipeline execution failed"
+          timestamp: $${time.format(sys.now())}
