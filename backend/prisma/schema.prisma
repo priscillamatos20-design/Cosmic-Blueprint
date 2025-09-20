@@ -1,0 +1,176 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  name      String
+  role      Role     @default(ARCHITECT)
+  avatar    String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  createdClients    Client[]           @relation("CreatedClients")
+  createdProjects   Project[]          @relation("CreatedProjects")
+  createdMeetings   Meeting[]          @relation("CreatedMeetings")
+  uploadedDocuments Document[]         @relation("UploadedDocuments")
+
+  @@map("users")
+}
+
+model Client {
+  id        String   @id @default(uuid())
+  name      String
+  email     String
+  phone     String
+  address   String?
+  company   String?
+  notes     String?
+  createdBy String   @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  creator   User        @relation("CreatedClients", fields: [createdBy], references: [id])
+  projects  Project[]
+  meetings  Meeting[]
+  documents Document[]
+
+  @@map("clients")
+}
+
+model Project {
+  id          String        @id @default(uuid())
+  title       String
+  description String?
+  clientId    String        @map("client_id")
+  status      ProjectStatus @default(DRAFT)
+  startDate   DateTime      @map("start_date")
+  endDate     DateTime?     @map("end_date")
+  budget      Decimal
+  createdBy   String        @map("created_by")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  client            Client            @relation(fields: [clientId], references: [id])
+  creator           User              @relation("CreatedProjects", fields: [createdBy], references: [id])
+  stages            ProjectStage[]
+  financialRecords  FinancialRecord[]
+  meetings          Meeting[]
+  documents         Document[]
+
+  @@map("projects")
+}
+
+model ProjectStage {
+  id          String            @id @default(uuid())
+  projectId   String            @map("project_id")
+  name        String
+  description String?
+  status      ProjectStageStatus @default(PENDING)
+  dueDate     DateTime?         @map("due_date")
+  order       Int
+  createdAt   DateTime          @default(now()) @map("created_at")
+
+  // Relations
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("project_stages")
+}
+
+model FinancialRecord {
+  id          String              @id @default(uuid())
+  projectId   String              @map("project_id")
+  type        FinancialRecordType
+  amount      Decimal
+  description String
+  date        DateTime
+  status      PaymentStatus       @default(PENDING)
+  createdAt   DateTime            @default(now()) @map("created_at")
+
+  // Relations
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("financial_records")
+}
+
+model Meeting {
+  id          String    @id @default(uuid())
+  title       String
+  description String?
+  projectId   String?   @map("project_id")
+  clientId    String?   @map("client_id")
+  dateTime    DateTime  @map("date_time")
+  duration    Int       // in minutes
+  location    String?
+  createdBy   String    @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  // Relations
+  project Project? @relation(fields: [projectId], references: [id])
+  client  Client?  @relation(fields: [clientId], references: [id])
+  creator User     @relation("CreatedMeetings", fields: [createdBy], references: [id])
+
+  @@map("meetings")
+}
+
+model Document {
+  id           String   @id @default(uuid())
+  filename     String
+  originalName String   @map("original_name")
+  filePath     String   @map("file_path")
+  fileSize     Int      @map("file_size")
+  mimeType     String   @map("mime_type")
+  projectId    String?  @map("project_id")
+  clientId     String?  @map("client_id")
+  uploadedBy   String   @map("uploaded_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Relations
+  project  Project? @relation(fields: [projectId], references: [id])
+  client   Client?  @relation(fields: [clientId], references: [id])
+  uploader User     @relation("UploadedDocuments", fields: [uploadedBy], references: [id])
+
+  @@map("documents")
+}
+
+enum Role {
+  ADMIN
+  ARCHITECT
+  CLIENT
+}
+
+enum ProjectStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum ProjectStageStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum FinancialRecordType {
+  INCOME
+  EXPENSE
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+}
